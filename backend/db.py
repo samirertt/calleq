@@ -1,4 +1,5 @@
 import os
+import json
 from typing import List, Dict, Any
 from pymilvus import MilvusClient
 from sentence_transformers import SentenceTransformer
@@ -69,24 +70,41 @@ def search_similar(query: str, collection_name: str = "conversations", limit: in
     
     return similar_docs
 
+def load_company_knowledge(json_file: str = "travel_agency_knowledge_base.json", collection_name: str = "company_knowledge") -> None:
+    """Load company knowledge base from JSON file into Milvus."""
+    # Initialize collection with correct dimension
+    init_collection(collection_name=collection_name, dimension=384)  # all-MiniLM-L6-v2 dimension
+    
+    # Load JSON data
+    with open(json_file, 'r', encoding='utf-8') as f:
+        knowledge_base = json.load(f)
+    
+    # Prepare documents for insertion
+    documents = []
+    for item in knowledge_base:
+        doc = {
+            "text": item["content"],
+            "metadata": {
+                "category": item["category"],
+                "tags": item["tags"]
+            }
+        }
+        documents.append(doc)
+    
+    # Add documents to Milvus
+    add_documents(documents, collection_name=collection_name)
+    print(f"Loaded {len(documents)} documents into {collection_name} collection")
+
 # Example usage
 if __name__ == "__main__":
-    # Initialize collection
-    init_collection()
+    # Load company knowledge base
+    load_company_knowledge()
     
-    # Add test documents
-    test_docs = [
-        {
-            "text": "Hello, how can I help you?",
-            "metadata": {"type": "greeting"}
-        },
-        {
-            "text": "I want to learn about your services",
-            "metadata": {"type": "inquiry"}
-        }
-    ]
-    add_documents(test_docs)
-    
-    # Search for similar documents
-    results = search_similar("Hello, tell me about your services")
-    print("Search results:", results) 
+    # Test search
+    results = search_similar("What are your cancellation policies?", collection_name="company_knowledge")
+    print("\nSearch results:")
+    for doc in results:
+        print(f"\nText: {doc['text']}")
+        print(f"Category: {doc['metadata']['category']}")
+        print(f"Tags: {doc['metadata']['tags']}")
+        print(f"Score: {doc['score']}") 
