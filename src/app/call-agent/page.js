@@ -29,23 +29,27 @@ export default function CallAgent() {
   const [agentResponse, setAgentResponse] = useState("");
   const wsRef = useRef(null);
   const audioRef = useRef(null);
+  const [callTimer, setCallTimer] = useState(0);
 
   // Initialize WebSocket connection
   useEffect(() => {
     const initializeCall = async () => {
       try {
-        const response = await fetch('https://f536-2a09-bac5-58c2-252d-00-3b4-6.ngrok-free.app/call/start', {
-          method: 'POST',
-        });
+        const response = await fetch(
+          "https://f536-2a09-bac5-58c2-252d-00-3b4-6.ngrok-free.app/call/start",
+          {
+            method: "POST",
+          }
+        );
         const data = await response.json();
         setSessionId(data.session_id);
-        
-        // Initialize WebSocket connection
-        wsRef.current = new WebSocket(`https://f536-2a09-bac5-58c2-252d-00-3b4-6.ngrok-free.app/call/text/${data.session_id}`);
-        
+
+        wsRef.current = new WebSocket(
+          `https://f536-2a09-bac5-58c2-252d-00-3b4-6.ngrok-free.app/call/text/${data.session_id}`
+        );
+
         wsRef.current.onmessage = async (event) => {
           if (event.data instanceof Blob) {
-            // Handle audio data
             const audioBlob = event.data;
             const audioUrl = URL.createObjectURL(audioBlob);
             if (audioRef.current) {
@@ -57,23 +61,22 @@ export default function CallAgent() {
               };
             }
           } else {
-            // Handle text response
             const response = JSON.parse(event.data);
             setAgentResponse(response.text);
           }
         };
 
         wsRef.current.onerror = (error) => {
-          console.error('WebSocket error:', error);
-          setError('Connection error. Please try again.');
+          console.error("WebSocket error:", error);
+          setError("Connection error. Please try again.");
         };
 
         wsRef.current.onclose = () => {
-          console.log('WebSocket connection closed');
+          console.log("WebSocket connection closed");
         };
       } catch (error) {
-        console.error('Error initializing call:', error);
-        setError('Failed to start call. Please try again.');
+        console.error("Error initializing call:", error);
+        setError("Failed to start call. Please try again.");
       }
     };
 
@@ -86,13 +89,28 @@ export default function CallAgent() {
     };
   }, []);
 
+  // Real-time timer
+  useEffect(() => {
+    const timerInterval = setInterval(() => {
+      setCallTimer((prev) => prev + 1);
+    }, 1000);
+
+    return () => clearInterval(timerInterval);
+  }, []);
+
   // Send transcript to backend when it changes
   useEffect(() => {
-    if (transcript && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        text: transcript,
-        session_id: sessionId
-      }));
+    if (
+      transcript &&
+      wsRef.current &&
+      wsRef.current.readyState === WebSocket.OPEN
+    ) {
+      wsRef.current.send(
+        JSON.stringify({
+          text: transcript,
+          session_id: sessionId,
+        })
+      );
     }
   }, [transcript, sessionId]);
 
@@ -136,17 +154,26 @@ export default function CallAgent() {
         }
       };
       recognition.onresult = (event) => {
-        let interimTranscript = "";
         let finalTranscript = "";
         for (let i = event.resultIndex; i < event.results.length; ++i) {
           if (event.results[i].isFinal) {
             finalTranscript += event.results[i][0].transcript;
-          } else {
-            interimTranscript += event.results[i][0].transcript;
           }
         }
-        setTranscript(finalTranscript + interimTranscript);
-        if (interimTranscript || finalTranscript) {
+        if (
+          finalTranscript &&
+          wsRef.current &&
+          wsRef.current.readyState === WebSocket.OPEN
+        ) {
+          wsRef.current.send(
+            JSON.stringify({
+              text: finalTranscript,
+              session_id: sessionId,
+            })
+          );
+        }
+        setTranscript(finalTranscript);
+        if (finalTranscript) {
           setIsSpeaking(true);
           clearTimeout(speakingTimeoutRef.current);
           speakingTimeoutRef.current = setTimeout(
@@ -206,11 +233,31 @@ export default function CallAgent() {
     setMicOn(!micOn);
   };
 
+  // Play agent audio and animate Lottie when agent is speaking
+  useEffect(() => {
+    if (isAgentSpeaking && audioRef.current) {
+      audioRef.current.play().catch(() => {});
+    } else if (!isAgentSpeaking && audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.currentTime = 0;
+    }
+  }, [isAgentSpeaking]);
+
+  // End button handler: stop agent speaking, stop audio, stop Lottie animation
+  const handleEndCall = () => {
+    setIsAgentSpeaking(false);
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.currentTime = 0;
+    }
+    setAgentResponse("");
+  };
+
   return (
     <div className="min-h-screen flex flex-col items-center justify-center bg-hero-gradient font-sans p-4 relative">
       {/* Audio element for playing responses */}
       <audio ref={audioRef} className="hidden" />
-      
+
       {/* Logo in top left */}
       <Link
         href="/"
@@ -457,17 +504,32 @@ export default function CallAgent() {
             {/* Call Timer */}
             <div className="absolute top-16 left-0 w-full flex flex-col items-center z-10">
               <span className="text-gray-700 font-semibold text-lg tracking-widest">
-                00:04
+                {String(Math.floor(callTimer / 60)).padStart(2, "0")}:
+                {String(callTimer % 60).padStart(2, "0")}
               </span>
             </div>
             {/* Lottie Animation Centered */}
             <div className="flex-1 flex flex-col items-center justify-center">
-              <Lottie
-                autoplay
-                loop={true}
-                animationData={answerAnimation}
+              <motion.div
+                animate={
+                  isAgentSpeaking
+                    ? { scale: [1, 1.15, 1], rotate: [0, 5, -5, 0] }
+                    : { scale: 1, rotate: 0 }
+                }
+                transition={{
+                  repeat: isAgentSpeaking ? Infinity : 0,
+                  duration: 1.2,
+                  ease: "easeInOut",
+                }}
                 className="w-[150px] h-[150px]"
-              />
+              >
+                <Lottie
+                  autoplay
+                  loop={isAgentSpeaking}
+                  animationData={answerAnimation}
+                  className="w-[150px] h-[150px]"
+                />
+              </motion.div>
             </div>
             {/* Agent Response Text */}
             <div className="absolute bottom-32 left-0 w-full px-6 text-center">
@@ -482,7 +544,10 @@ export default function CallAgent() {
                 <span className="text-xs text-gray-700 mt-2">Add</span>
               </div>
               <div className="flex flex-col items-center">
-                <button className="w-16 h-16 rounded-full bg-red-500 flex items-center justify-center text-white text-2xl shadow">
+                <button
+                  className="w-16 h-16 rounded-full bg-red-500 flex items-center justify-center text-white text-2xl shadow"
+                  onClick={handleEndCall}
+                >
                   <FaPhoneSlash />
                 </button>
                 <span className="text-xs text-gray-700 mt-2">End</span>
