@@ -1,6 +1,6 @@
 import os
 from typing import List, Dict, Any
-from pymilvus import MilvusClient, model
+from pymilvus import MilvusClient
 from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
 
@@ -25,20 +25,17 @@ def init_collection(collection_name: str = "conversations", dimension: int = 768
 
 def add_documents(documents: List[Dict[str, Any]], collection_name: str = "conversations") -> None:
     """Add documents to Milvus."""
-    # Initialize embedding model
-    embedding_fn = model.DefaultEmbeddingFunction()
-    
     # Prepare texts for embeddings
     texts = [doc["text"] for doc in documents]
     
-    # Get embeddings
-    vectors = embedding_fn.encode_documents(texts)
+    # Get embeddings using our sentence transformer
+    vectors = embedding_model.encode(texts)
     
     # Prepare data for insertion
     data = [
         {
             "id": i,
-            "vector": vectors[i],
+            "vector": vectors[i].tolist(),
             "text": doc["text"],
             "metadata": doc.get("metadata", {})
         }
@@ -50,11 +47,8 @@ def add_documents(documents: List[Dict[str, Any]], collection_name: str = "conve
 
 def search_similar(query: str, collection_name: str = "conversations", limit: int = 5) -> List[Dict[str, Any]]:
     """Search for similar documents in Milvus."""
-    # Initialize embedding model
-    embedding_fn = model.DefaultEmbeddingFunction()
-    
-    # Get query embedding
-    query_vector = embedding_fn.encode_documents([query])[0]
+    # Get query embedding using our sentence transformer
+    query_vector = embedding_model.encode([query])[0].tolist()
     
     # Search for similar documents
     results = client.search(

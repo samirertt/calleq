@@ -67,8 +67,12 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             data = await websocket.receive_text()
             text_input = json.loads(data)
             
-            # Process text input
-            result = process_text_input(text_input["text"], session_id)
+            # Process text input with conversation history
+            result = process_text_input(
+                text_input["text"], 
+                session_id,
+                conversation_history=conversations[session_id]
+            )
             
             # Add to conversation history
             conversations[session_id].append({
@@ -84,7 +88,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             await websocket.send_text(json.dumps({
                 "type": "response",
                 "text": result["response"],
-                "emotion": result["emotion"],
+                "emotions": result["emotions"],
                 "context": result["context"]
             }))
             
