@@ -55,6 +55,14 @@ export default function CallAgent() {
         setRecognizing(false);
         setIsSpeaking(false);
         console.log("Recognition ended");
+        // Restart recognition if mic is still on
+        if (micOn) {
+          try {
+            recognition.start();
+          } catch (e) {
+            console.log("Error restarting recognition:", e);
+          }
+        }
       };
       recognition.onresult = (event) => {
         let interimTranscript = "";
@@ -89,6 +97,16 @@ export default function CallAgent() {
         console.log("Recognition error", e);
       };
     }
+
+    // Start recognition if mic is on
+    if (micOn && recognitionRef.current) {
+      try {
+        recognitionRef.current.start();
+      } catch (e) {
+        console.log("Error starting recognition:", e);
+      }
+    }
+
     // Cleanup
     return () => {
       if (recognitionRef.current) {
@@ -100,26 +118,21 @@ export default function CallAgent() {
       }
       clearTimeout(speakingTimeoutRef.current);
     };
-  }, []);
+  }, [micOn]); // Add micOn as dependency
 
-  // Manual start/stop for debugging
-  const handleStart = () => {
-    if (recognitionRef.current && !recognizing) {
-      try {
-        recognitionRef.current.start();
-        setError("");
-      } catch (e) {
-        setError(
-          "Could not start speech recognition. Try refreshing the page."
-        );
-        console.log("Start error", e);
+  const toggleMic = () => {
+    if (recognitionRef.current) {
+      if (micOn) {
+        recognitionRef.current.stop();
+      } else {
+        try {
+          recognitionRef.current.start();
+        } catch (e) {
+          console.log("Error starting recognition:", e);
+        }
       }
     }
-  };
-  const handleStop = () => {
-    if (recognitionRef.current && recognizing) {
-      recognitionRef.current.stop();
-    }
+    setMicOn(!micOn);
   };
 
   return (
@@ -226,7 +239,7 @@ export default function CallAgent() {
                   ? "bg-primary/20 text-primary"
                   : "bg-red-200/30 text-red-500"
               }`}
-              onClick={() => setMicOn((v) => !v)}
+              onClick={toggleMic}
               aria-label={micOn ? "Turn microphone off" : "Turn microphone on"}
               title={micOn ? "Turn microphone off" : "Turn microphone on"}
             >
