@@ -24,6 +24,77 @@ export default function CallAgent() {
   const recognitionRef = useRef(null);
   const [supported, setSupported] = useState(true);
   const speakingTimeoutRef = useRef();
+  const [sessionId, setSessionId] = useState(null);
+  const [isAgentSpeaking, setIsAgentSpeaking] = useState(false);
+  const [agentResponse, setAgentResponse] = useState("");
+  const wsRef = useRef(null);
+  const audioRef = useRef(null);
+
+  // Initialize WebSocket connection
+  useEffect(() => {
+    const initializeCall = async () => {
+      try {
+        const response = await fetch('https://f536-2a09-bac5-58c2-252d-00-3b4-6.ngrok-free.app/call/start', {
+          method: 'POST',
+        });
+        const data = await response.json();
+        setSessionId(data.session_id);
+        
+        // Initialize WebSocket connection
+        wsRef.current = new WebSocket(`https://f536-2a09-bac5-58c2-252d-00-3b4-6.ngrok-free.app/call/text/${data.session_id}`);
+        
+        wsRef.current.onmessage = async (event) => {
+          if (event.data instanceof Blob) {
+            // Handle audio data
+            const audioBlob = event.data;
+            const audioUrl = URL.createObjectURL(audioBlob);
+            if (audioRef.current) {
+              audioRef.current.src = audioUrl;
+              audioRef.current.play();
+              setIsAgentSpeaking(true);
+              audioRef.current.onended = () => {
+                setIsAgentSpeaking(false);
+              };
+            }
+          } else {
+            // Handle text response
+            const response = JSON.parse(event.data);
+            setAgentResponse(response.text);
+          }
+        };
+
+        wsRef.current.onerror = (error) => {
+          console.error('WebSocket error:', error);
+          setError('Connection error. Please try again.');
+        };
+
+        wsRef.current.onclose = () => {
+          console.log('WebSocket connection closed');
+        };
+      } catch (error) {
+        console.error('Error initializing call:', error);
+        setError('Failed to start call. Please try again.');
+      }
+    };
+
+    initializeCall();
+
+    return () => {
+      if (wsRef.current) {
+        wsRef.current.close();
+      }
+    };
+  }, []);
+
+  // Send transcript to backend when it changes
+  useEffect(() => {
+    if (transcript && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        text: transcript,
+        session_id: sessionId
+      }));
+    }
+  }, [transcript, sessionId]);
 
   useEffect(() => {
     const SpeechRecognition =
@@ -118,7 +189,7 @@ export default function CallAgent() {
       }
       clearTimeout(speakingTimeoutRef.current);
     };
-  }, [micOn]); // Add micOn as dependency
+  }, [micOn]);
 
   const toggleMic = () => {
     if (recognitionRef.current) {
@@ -137,6 +208,9 @@ export default function CallAgent() {
 
   return (
     <div className="min-h-screen flex flex-col items-center justify-center bg-hero-gradient font-sans p-4 relative">
+      {/* Audio element for playing responses */}
+      <audio ref={audioRef} className="hidden" />
+      
       {/* Logo in top left */}
       <Link
         href="/"
@@ -395,6 +469,10 @@ export default function CallAgent() {
                 className="w-[150px] h-[150px]"
               />
             </div>
+            {/* Agent Response Text */}
+            <div className="absolute bottom-32 left-0 w-full px-6 text-center">
+              <p className="text-gray-700 text-sm">{agentResponse}</p>
+            </div>
             {/* Call Controls (bottom) */}
             <div className="w-full absolute bottom-10 left-0 flex items-center justify-center gap-12 z-10">
               <div className="flex flex-col items-center">
@@ -420,9 +498,9 @@ export default function CallAgent() {
           <div className="-mt-5 text-lg font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-primary to-blackText flex items-center justify-center gap-2">
             <motion.span
               initial={{ scale: 1 }}
-              animate={{ scale: [1, 1.2, 1] }}
+              animate={isAgentSpeaking ? { scale: [1, 1.2, 1] } : { scale: 1 }}
               transition={{
-                repeat: Infinity,
+                repeat: isAgentSpeaking ? Infinity : 0,
                 duration: 1.2,
                 ease: "easeInOut",
               }}
@@ -464,7 +542,7 @@ export default function CallAgent() {
                 />
               </svg>
             </motion.span>
-            Agent Answering...
+            {isAgentSpeaking ? "Agent Speaking..." : "Agent Ready"}
           </div>
         </div>
       </div>
