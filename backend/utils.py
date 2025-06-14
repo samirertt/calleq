@@ -2,7 +2,7 @@ import os
 from typing import List, Dict
 import torch
 from transformers import pipeline
-import google.generativeai as genai
+from google import genai
 from dotenv import load_dotenv
 from db import search_similar
 import requests
@@ -57,7 +57,7 @@ def generate_response(
         emotion_text = ", ".join([f"{e['emotion']} ({e['score']:.2f})" for e in emotions])
         
         # Build prompt
-        prompt = f"""You are a caring call center agent with emotional intelligence.
+        prompt = f"""You are a helpful call center agent. Keep your responses brief and direct - maximum 2 sentences.
         
 User's emotional states (with confidence scores): {emotion_text}
 
@@ -69,7 +69,11 @@ Conversation history:
 
 User's message: {user_text}
 
-Please provide a natural, empathetic response that addresses the user's needs while considering their emotional states."""
+Instructions:
+1. Keep your response brief and direct - maximum 2 sentences
+2. Do not mention emotions in your response
+3. Focus on answering the user's question directly
+4. If the user asks what you can help with, provide a brief list of 2-3 main capabilities"""
 
         # Generate response using Gemini
         response = client.models.generate_content(
