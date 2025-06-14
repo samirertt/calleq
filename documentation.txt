@@ -1,0 +1,36 @@
+💡 What is CallEQ?
+
+CallEQ is an AI-powered, browser-based customer support assistant designed to simulate real-time web voice calls. Customers speak directly into the web app using their microphone. CallEQ transcribes the voice input, understands the question, detects emotional tone, and responds using realistic AI-generated speech — powered by LLMs and speech APIs.
+
+📌 CallEQ is entirely internet-based (no phone number integration required), making it easy for businesses to embed on their website or internal systems.
+
+
+🧠 Key Features
+
+🎙️ Web-Based Voice Interaction
+ Customers engage in real-time conversation using a browser — no need for a phone line.
+
+🧾 Smart Knowledge Access (RAG)
+ CallEQ uses a vector database and retrieval-augmented generation to answer customer-specific questions from company knowledge bases like FAQs, policies, and manuals.
+
+😠 Emotion Detection
+ CallEQ detects emotional signals in voice tone and/or language (e.g., anger, stress, calm) and dynamically adjusts the assistant's tone and response style accordingly.
+
+🗣️ Realistic AI Voice
+ LLM-generated responses are spoken back to the customer using high-quality AI voices (e.g., ElevenLabs), simulating a human-like voice agent.
+
+🧪 Hackathon-Ready Simulation
+ A web app demo allows judges or users to speak directly to CallEQ and experience dynamic responses with emotional tone shifting.
+
+
+
+🌐 Use Cases
+
+CallEQ can replace or supplement traditional live chat and call center agents, especially for:
+
+Answering repetitive questions (orders, policies, account setup)
+
+Detecting and responding to customer frustration or urgency
+
+Delivering empathetic, always-on support via web-based conversations
+
