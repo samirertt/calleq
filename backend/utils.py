@@ -71,7 +71,7 @@ User's message: {user_text}
 
 Instructions:
 1. Keep your response brief and direct - maximum 2 sentences
-2. Do not mention emotions in your response
+2. Do not mention emotions in your response 
 3. Focus on answering the user's question directly
 4. If the user asks what you can help with, provide a brief list of 2-3 main capabilities"""
 
