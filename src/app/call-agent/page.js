@@ -24,6 +24,257 @@ export default function CallAgent() {
   const recognitionRef = useRef(null);
   const [supported, setSupported] = useState(true);
   const speakingTimeoutRef = useRef();
+  const [sessionId, setSessionId] = useState(null);
+  const [isAgentSpeaking, setIsAgentSpeaking] = useState(false);
+  const [agentResponse, setAgentResponse] = useState("");
+  const wsRef = useRef(null);
+  const audioRef = useRef(null);
+  const [callTimer, setCallTimer] = useState(0);
+  const [voices, setVoices] = useState([]);
+  const [voicesLoaded, setVoicesLoaded] = useState(false);
+  const [selectedVoice, setSelectedVoice] = useState(null);
+  const [pendingSpeech, setPendingSpeech] = useState(null);
+  const retryCountRef = useRef(0);
+  const MAX_RETRIES = 3;
+
+  // Initialize speech synthesis
+  useEffect(() => {
+    if (!("speechSynthesis" in window)) {
+      setError("Text-to-speech not supported in this browser.");
+      return;
+    }
+    const loadVoices = () => {
+      const allVoices = window.speechSynthesis.getVoices();
+      setVoices(allVoices);
+      setVoicesLoaded(allVoices.length > 0);
+      // Prefer Google/Natural en-US voice
+      const preferred = allVoices.find(
+        (v) => v.lang === "en-US" && /Google|Natural/i.test(v.name)
+      );
+      setSelectedVoice(
+        preferred || allVoices.find((v) => v.lang === "en-US") || allVoices[0]
+      );
+    };
+    loadVoices();
+    window.speechSynthesis.onvoiceschanged = loadVoices;
+    return () => {
+      window.speechSynthesis.onvoiceschanged = null;
+    };
+  }, []);
+
+  // Speak any pending speech when voices are loaded
+  useEffect(() => {
+    if (voicesLoaded && pendingSpeech) {
+      speakText(pendingSpeech);
+      setPendingSpeech(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [voicesLoaded]);
+
+  // Use browser's TTS to speak the agent's response
+  const speakText = (text) => {
+    if (!("speechSynthesis" in window)) {
+      setError("Text-to-speech not supported in this browser.");
+      return;
+    }
+    if (!voicesLoaded) {
+      setTimeout(() => speakText(text), 300); // Wait and retry
+      return;
+    }
+    if (!text || !text.trim()) return;
+    // Stop recognition if running
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch (e) {}
+    }
+    // Only cancel if something is speaking
+    if (window.speechSynthesis.speaking) {
+      window.speechSynthesis.cancel();
+    }
+    const utter = new SpeechSynthesisUtterance(text);
+    if (selectedVoice) utter.voice = selectedVoice;
+    utter.rate = 1.0;
+    utter.pitch = 1.0;
+    utter.volume = 1.0;
+    utter.onstart = () => {
+      setIsAgentSpeaking(true);
+      retryCountRef.current = 0;
+    };
+    utter.onend = () => {
+      setIsAgentSpeaking(false);
+      // Resume recognition if mic is on
+      if (recognitionRef.current && micOn) {
+        try {
+          recognitionRef.current.start();
+        } catch (e) {}
+      }
+    };
+    utter.onerror = (event) => {
+      console.error("Speech synthesis error:", event, event.error);
+      setIsAgentSpeaking(false);
+      if (retryCountRef.current < MAX_RETRIES) {
+        retryCountRef.current++;
+        setTimeout(() => speakText(text), 1000);
+      } else {
+        if (recognitionRef.current && micOn) {
+          try {
+            recognitionRef.current.start();
+          } catch (e) {}
+        }
+      }
+    };
+    try {
+      window.speechSynthesis.speak(utter);
+    } catch (error) {
+      console.error("Error speaking text:", error);
+      if (recognitionRef.current && micOn) {
+        try {
+          recognitionRef.current.start();
+        } catch (e) {}
+      }
+    }
+  };
+
+  // Stop speaking
+  const stopSpeaking = () => {
+    if ("speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
+      setIsAgentSpeaking(false);
+      console.log("Speech stopped");
+      // Resume speech recognition if mic is on
+      if (recognitionRef.current && micOn) {
+        try {
+          recognitionRef.current.start();
+        } catch (e) {
+          console.log("Error restarting recognition:", e);
+        }
+      }
+    }
+  };
+
+  // End button handler: stop agent speaking, stop audio, stop Lottie animation
+  const handleEndCall = () => {
+    stopSpeaking();
+    setAgentResponse("");
+  };
+
+  // Simulate a conversation
+  const simulateConversation = () => {
+    const userQuestions = [
+      "How can I help you today?",
+      "What's on your mind?",
+      "Tell me more about that.",
+      "I'm listening.",
+      "Go ahead.",
+    ];
+    const agentResponses = [
+      "I'm here to assist you with any questions.",
+      "Let me check that for you.",
+      "I'm processing your request.",
+      "Thank you for your patience.",
+      "I understand. How can I help further?",
+    ];
+    const randomQuestion =
+      userQuestions[Math.floor(Math.random() * userQuestions.length)];
+    const randomResponse =
+      agentResponses[Math.floor(Math.random() * agentResponses.length)];
+    setTranscript(randomQuestion);
+    setAgentResponse(randomResponse);
+    speakText(randomResponse);
+  };
+
+  // Initialize WebSocket connection
+  useEffect(() => {
+    const initializeCall = async () => {
+      try {
+        const response = await fetch(
+          "https://major-narwhal-picked.ngrok-free.app/call/start",
+          {
+            method: "POST",
+          }
+        );
+        const data = await response.json();
+        setSessionId(data.session_id);
+
+        wsRef.current = new WebSocket(
+          `wss://major-narwhal-picked.ngrok-free.app/call/text/${data.session_id}`
+        );
+
+        wsRef.current.onmessage = async (event) => {
+          if (event.data instanceof Blob) {
+            // Ignore audio data from backend
+            console.log("Received audio data, but using browser TTS instead.");
+          } else {
+            console.log("WebSocket message received:", event.data);
+            let response;
+            try {
+              response = JSON.parse(event.data);
+            } catch (e) {
+              console.error(
+                "Failed to parse WebSocket message as JSON:",
+                event.data
+              );
+              return;
+            }
+            console.log("Parsed response:", response);
+            if (response && response.text) {
+              console.log("Setting agentResponse and speaking:", response.text);
+              setAgentResponse(response.text);
+              speakText(response.text); // Speak the text using browser TTS
+            } else {
+              console.warn("No 'text' field in response:", response);
+            }
+          }
+        };
+
+        wsRef.current.onerror = (error) => {
+          console.error("WebSocket error:", error);
+          setError("Connection error. Please try again.");
+        };
+
+        wsRef.current.onclose = () => {
+          console.log("WebSocket connection closed");
+        };
+      } catch (error) {
+        console.error("Error initializing call:", error);
+        setError("Failed to start call. Please try again.");
+      }
+    };
+
+    initializeCall();
+
+    return () => {
+      if (wsRef.current) {
+        wsRef.current.close();
+      }
+    };
+  }, []);
+
+  // Real-time timer
+  useEffect(() => {
+    const timerInterval = setInterval(() => {
+      setCallTimer((prev) => prev + 1);
+    }, 1000);
+
+    return () => clearInterval(timerInterval);
+  }, []);
+
+  // Send transcript to backend when it changes
+  useEffect(() => {
+    if (
+      transcript &&
+      wsRef.current &&
+      wsRef.current.readyState === WebSocket.OPEN
+    ) {
+      wsRef.current.send(
+        JSON.stringify({
+          text: transcript,
+          session_id: sessionId,
+        })
+      );
+    }
+  }, [transcript, sessionId]);
 
   useEffect(() => {
     const SpeechRecognition =
@@ -65,17 +316,26 @@ export default function CallAgent() {
         }
       };
       recognition.onresult = (event) => {
-        let interimTranscript = "";
         let finalTranscript = "";
         for (let i = event.resultIndex; i < event.results.length; ++i) {
           if (event.results[i].isFinal) {
             finalTranscript += event.results[i][0].transcript;
-          } else {
-            interimTranscript += event.results[i][0].transcript;
           }
         }
-        setTranscript(finalTranscript + interimTranscript);
-        if (interimTranscript || finalTranscript) {
+        if (
+          finalTranscript &&
+          wsRef.current &&
+          wsRef.current.readyState === WebSocket.OPEN
+        ) {
+          wsRef.current.send(
+            JSON.stringify({
+              text: finalTranscript,
+              session_id: sessionId,
+            })
+          );
+        }
+        setTranscript(finalTranscript);
+        if (finalTranscript) {
           setIsSpeaking(true);
           clearTimeout(speakingTimeoutRef.current);
           speakingTimeoutRef.current = setTimeout(
@@ -118,7 +378,7 @@ export default function CallAgent() {
       }
       clearTimeout(speakingTimeoutRef.current);
     };
-  }, [micOn]); // Add micOn as dependency
+  }, [micOn]);
 
   const toggleMic = () => {
     if (recognitionRef.current) {
@@ -135,26 +395,39 @@ export default function CallAgent() {
     setMicOn(!micOn);
   };
 
+  // Play agent audio and animate Lottie when agent is speaking
+  useEffect(() => {
+    if (isAgentSpeaking && audioRef.current) {
+      audioRef.current.play().catch(() => {});
+    } else if (!isAgentSpeaking && audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.currentTime = 0;
+    }
+  }, [isAgentSpeaking]);
+
   return (
     <div className="min-h-screen flex flex-col items-center justify-center bg-hero-gradient font-sans p-4 relative">
+      {/* Audio element for playing responses */}
+      <audio ref={audioRef} className="hidden" />
+
       {/* Logo in top left */}
       <Link
         href="/"
-        className="fixed top-6 left-12 z-20 flex items-center gap-2 cursor-pointer"
+        className="fixed top-4 sm:top-6 left-4 sm:left-12 z-20 flex items-center gap-2 cursor-pointer"
       >
-        <Image src="/images/logo.png" alt="Logo" width={60} height={60} />
-        <span className="text-2xl font-bold text-blackText">CallEQ</span>
+        <Image src="/images/logo.png" alt="Logo" width={40} height={40} className="w-10 h-10 sm:w-[60px] sm:h-[60px]" />
+        <span className="text-xl sm:text-2xl font-bold text-blackText">CallEQ</span>
       </Link>
-      <div className="w-full max-w-5xl flex flex-col md:flex-row items-center justify-center gap-12">
+      <div className="w-full max-w-5xl flex flex-col md:flex-row items-center justify-center gap-6 sm:gap-12 px-4 sm:px-0">
         {/* User Speaking Animation */}
-        <div className="flex flex-col items-center gap-6 flex-1">
+        <div className="flex flex-col items-center gap-4 sm:gap-6 flex-1 w-full max-w-[300px] sm:max-w-none">
           {error && (
-            <div className="text-red-500 font-semibold text-center mb-4">
+            <div className="text-red-500 font-semibold text-center mb-2 sm:mb-4 text-sm sm:text-base">
               {error}
             </div>
           )}
           <motion.div
-            className="rounded-full bg-primary/10 p-8 shadow-lg"
+            className="rounded-full bg-primary/10 p-6 sm:p-8 shadow-lg"
             animate={isSpeaking ? { scale: [1, 1.15, 1] } : { scale: 1 }}
             transition={{
               repeat: isSpeaking ? Infinity : 0,
@@ -163,7 +436,7 @@ export default function CallAgent() {
             }}
           >
             <motion.div
-              className="bg-primary rounded-full w-20 h-20 flex items-center justify-center"
+              className="bg-primary rounded-full w-16 h-16 sm:w-20 sm:h-20 flex items-center justify-center"
               animate={isSpeaking ? { scale: [1, 1.1, 1] } : { scale: 1 }}
               transition={{
                 repeat: isSpeaking ? Infinity : 0,
@@ -171,16 +444,16 @@ export default function CallAgent() {
                 ease: "easeInOut",
               }}
             >
-              <svg width="36" height="36" fill="none" viewBox="0 0 24 24">
+              <svg width="28" height="28" fill="none" viewBox="0 0 24 24" className="sm:w-9 sm:h-9">
                 <path
                   fill="#fff"
-                  d="M12 16a4 4 0 0 0 4-4V8a4 4 0 1 0-8 0v4a4 4 0 0 0 4 4Zm6-4a6 6 0 1 1-12 0V8a6 6 0 1 1 12 0v4Zm-6 7a7.978 7.978 0 0 1-6.32-3.16A1 1 0 0 1 6.1 14.1a1 1 0 0 1 1.4.2A5.978 5.978 0 0 0 12 19a5.978 5.978 0 0 0 4.5-2.7 1 1 0 0 1 1.6 1.2A7.978 7.978 0 0 1 12 19Z"
+                  d="M12 16a4 4 0 0 0 4-4V8a4 4 0 1 0-8 0v4a4 4 0 0 0 4 4Zm6-4a6 6 0 1 1-12 0V8a6 6 0 1 1 12 0v4Zm-6 7a7.978 7.978 0 0 1-6.32-3.16A1 1 0 0 1 6.1 14.1a1 1 0 0 1 1.4.2A5.978 5.978 0 0 0 12 19a5.978 5.978 0 0 0 4.5-2.7a1 1 0 0 1 1.6 1.2A7.978 7.978 0 0 1 12 19Z"
                 />
               </svg>
             </motion.div>
           </motion.div>
           <motion.div
-            className="mt-0 text-lg font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-primary to-blackText flex items-center justify-center gap-2"
+            className="mt-0 text-base sm:text-lg font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-primary to-blackText flex items-center justify-center gap-2"
             animate={{ opacity: isSpeaking ? 1 : 0 }}
             transition={{ duration: 0.3 }}
           >
@@ -194,7 +467,7 @@ export default function CallAgent() {
               }}
               className="inline-flex"
             >
-              <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" className="sm:w-6 sm:h-6">
                 <rect
                   x="3"
                   y="10"
@@ -232,9 +505,9 @@ export default function CallAgent() {
             User Speaking...
           </motion.div>
           {/* Mic and Cancel Icons BELOW */}
-          <div className="flex items-center justify-between w-full max-w-[180px] mt-2 mb-2">
+          <div className="flex items-center justify-between w-full max-w-[160px] sm:max-w-[180px] mt-2 mb-2">
             <button
-              className={`flex items-center justify-center w-12 h-12 rounded-full shadow transition text-2xl ${
+              className={`flex items-center justify-center w-10 h-10 sm:w-12 sm:h-12 rounded-full shadow transition text-xl sm:text-2xl ${
                 micOn
                   ? "bg-primary/20 text-primary"
                   : "bg-red-200/30 text-red-500"
@@ -245,36 +518,35 @@ export default function CallAgent() {
             >
               {micOn ? <FaMicrophone /> : <FaMicrophoneSlash />}
             </button>
-            <span className="flex items-center justify-center w-12 h-12 rounded-full bg-gray-300/60 text-gray-600 text-2xl shadow">
+            <span className="flex items-center justify-center w-10 h-10 sm:w-12 sm:h-12 rounded-full bg-gray-300/60 text-gray-600 text-xl sm:text-2xl shadow">
               <FaTimes />
             </span>
           </div>
           {/* Transcript at the bottom */}
-          <div className="min-h-[32px] text-base text-blackText font-mono text-center mt-2 px-2">
+          <div className="min-h-[32px] text-sm sm:text-base text-blackText font-mono text-center mt-2 px-2">
             {transcript}
           </div>
         </div>
 
         {/* iPhone Mockup with Agent Call UI */}
         <div className="flex-1 flex flex-col items-center">
-          <div className="relative w-[360px] h-[700px] rounded-[3rem] scale-90 bg-gradient-to-br from-[#ece8fe] via-[#f8e1ff] to-[#f3efff] shadow-2xl border-[8px] border-white flex flex-col items-center justify-end overflow-hidden">
+          <div className="relative w-[280px] h-[560px] sm:w-[360px] sm:h-[700px] rounded-[2rem] sm:rounded-[3rem] scale-90 bg-gradient-to-br from-[#ece8fe] via-[#f8e1ff] to-[#f3efff] shadow-2xl border-[6px] sm:border-[8px] border-white flex flex-col items-center justify-end overflow-hidden">
             {/* iPhone Notch (pill) */}
-            <div className="absolute top-3 left-1/2 -translate-x-1/2 w-32 h-7 bg-black/40 rounded-full z-20 flex items-center justify-center">
-              <div className="w-3 h-3 bg-white/80 rounded-full mx-1" />
-              <div className="w-6 h-2 bg-white/40 rounded-full mx-1" />
+            <div className="absolute top-2 sm:top-3 left-1/2 -translate-x-1/2 w-24 sm:w-32 h-6 sm:h-7 bg-black/40 rounded-full z-20 flex items-center justify-center">
+              <div className="w-2 sm:w-3 h-2 sm:h-3 bg-white/80 rounded-full mx-1" />
+              <div className="w-4 sm:w-6 h-1.5 sm:h-2 bg-white/40 rounded-full mx-1" />
             </div>
             {/* Status Bar */}
-            <div className="absolute top-5 left-6 text-[16px] text-gray-400 z-10">
+            <div className="absolute top-4 sm:top-5 left-4 sm:left-6 text-[14px] sm:text-[16px] text-gray-400 z-10">
               6:00
             </div>
-            <div className="absolute top-5 right-6 text-xs text-gray-400 z-10 flex items-center gap-1">
+            <div className="absolute top-4 sm:top-5 right-4 sm:right-6 text-[10px] sm:text-xs text-gray-400 z-10 flex items-center gap-1">
               {/* Signal Bars */}
               <svg
-                width="18"
-                height="12"
-                viewBox="0 0 18 12"
+                width="14" height="10" viewBox="0 0 18 12"
                 fill="none"
                 xmlns="http://www.w3.org/2000/svg"
+                className="sm:w-[18px] sm:h-[12px]"
               >
                 <rect
                   x="0"
@@ -315,11 +587,10 @@ export default function CallAgent() {
               </svg>
               {/* WiFi Icon */}
               <svg
-                width="16"
-                height="12"
-                viewBox="0 0 16 12"
+                width="12" height="10" viewBox="0 0 16 12"
                 fill="none"
                 xmlns="http://www.w3.org/2000/svg"
+                className="sm:w-[16px] sm:h-[12px]"
               >
                 <path
                   d="M8 10C8.55228 10 9 10.4477 9 11C9 11.5523 8.55228 12 8 12C7.44772 12 7 11.5523 7 11C7 10.4477 7.44772 10 8 10Z"
@@ -343,11 +614,10 @@ export default function CallAgent() {
               </svg>
               {/* Battery Toggle */}
               <svg
-                width="22"
-                height="12"
-                viewBox="0 0 22 12"
+                width="18" height="10" viewBox="0 0 22 12"
                 fill="none"
                 xmlns="http://www.w3.org/2000/svg"
+                className="sm:w-[22px] sm:h-[12px]"
               >
                 <rect
                   x="0.75"
@@ -381,55 +651,77 @@ export default function CallAgent() {
               </svg>
             </div>
             {/* Call Timer */}
-            <div className="absolute top-16 left-0 w-full flex flex-col items-center z-10">
-              <span className="text-gray-700 font-semibold text-lg tracking-widest">
-                00:04
+            <div className="absolute top-12 sm:top-16 left-0 w-full flex flex-col items-center z-10">
+              <span className="text-gray-700 font-semibold text-base sm:text-lg tracking-widest">
+                {String(Math.floor(callTimer / 60)).padStart(2, "0")}:
+                {String(callTimer % 60).padStart(2, "0")}
               </span>
             </div>
             {/* Lottie Animation Centered */}
             <div className="flex-1 flex flex-col items-center justify-center">
-              <Lottie
-                autoplay
-                loop={true}
-                animationData={answerAnimation}
-                className="w-[150px] h-[150px]"
-              />
+              <motion.div
+                animate={
+                  isAgentSpeaking
+                    ? { scale: [1, 1.15, 1], rotate: [0, 5, -5, 0] }
+                    : { scale: 1, rotate: 0 }
+                }
+                transition={{
+                  repeat: isAgentSpeaking ? Infinity : 0,
+                  duration: 1.2,
+                  ease: "easeInOut",
+                }}
+                className="w-[120px] h-[120px] sm:w-[150px] sm:h-[150px]"
+              >
+                <Lottie
+                  autoplay
+                  loop={isAgentSpeaking}
+                  animationData={answerAnimation}
+                  className="w-[120px] h-[120px] sm:w-[150px] sm:h-[150px]"
+                />
+              </motion.div>
+            </div>
+            {/* Agent Response Text */}
+            <div className="absolute bottom-24 sm:bottom-32 left-0 w-full px-4 sm:px-6 text-center">
+              <p className="text-gray-700 text-xs sm:text-sm">{agentResponse}</p>
             </div>
             {/* Call Controls (bottom) */}
-            <div className="w-full absolute bottom-10 left-0 flex items-center justify-center gap-12 z-10">
+            <div className="w-full absolute bottom-6 sm:bottom-10 left-0 flex items-center justify-center gap-8 sm:gap-12 z-10">
               <div className="flex flex-col items-center">
-                <button className="w-16 h-16 rounded-full bg-gray-400/30 flex items-center justify-center text-white text-2xl shadow">
+                <button className="w-12 h-12 sm:w-16 sm:h-16 rounded-full bg-gray-400/30 flex items-center justify-center text-white text-xl sm:text-2xl shadow">
                   <FaUserPlus />
                 </button>
-                <span className="text-xs text-gray-700 mt-2">Add</span>
+                <span className="text-[10px] sm:text-xs text-gray-700 mt-1 sm:mt-2">Add</span>
               </div>
               <div className="flex flex-col items-center">
-                <button className="w-16 h-16 rounded-full bg-red-500 flex items-center justify-center text-white text-2xl shadow">
+                <button
+                  className="w-12 h-12 sm:w-16 sm:h-16 rounded-full bg-red-500 flex items-center justify-center text-white text-xl sm:text-2xl shadow"
+                  onClick={handleEndCall}
+                >
                   <FaPhoneSlash />
                 </button>
-                <span className="text-xs text-gray-700 mt-2">End</span>
+                <span className="text-[10px] sm:text-xs text-gray-700 mt-1 sm:mt-2">End</span>
               </div>
               <div className="flex flex-col items-center">
-                <button className="w-16 h-16 rounded-full bg-gray-400/30 flex items-center justify-center text-white text-2xl shadow">
+                <button className="w-12 h-12 sm:w-16 sm:h-16 rounded-full bg-gray-400/30 flex items-center justify-center text-white text-xl sm:text-2xl shadow">
                   <FaTh />
                 </button>
-                <span className="text-xs text-gray-700 mt-2">Keypad</span>
+                <span className="text-[10px] sm:text-xs text-gray-700 mt-1 sm:mt-2">Keypad</span>
               </div>
             </div>
           </div>
-          <div className="-mt-5 text-lg font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-primary to-blackText flex items-center justify-center gap-2">
+          <div className="-mt-4 sm:-mt-5 text-base sm:text-lg font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-primary to-blackText flex items-center justify-center gap-2">
             <motion.span
               initial={{ scale: 1 }}
-              animate={{ scale: [1, 1.2, 1] }}
+              animate={isAgentSpeaking ? { scale: [1, 1.2, 1] } : { scale: 1 }}
               transition={{
-                repeat: Infinity,
+                repeat: isAgentSpeaking ? Infinity : 0,
                 duration: 1.2,
                 ease: "easeInOut",
               }}
               className="inline-flex"
             >
               {/* Speaking wave icon */}
-              <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" className="sm:w-6 sm:h-6">
                 <rect
                   x="3"
                   y="10"
@@ -464,7 +756,7 @@ export default function CallAgent() {
                 />
               </svg>
             </motion.span>
-            Agent Answering...
+            {isAgentSpeaking ? "Agent Speaking..." : "Agent Ready"}
           </div>
         </div>
       </div>
