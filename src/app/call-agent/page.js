@@ -30,13 +30,166 @@ export default function CallAgent() {
   const wsRef = useRef(null);
   const audioRef = useRef(null);
   const [callTimer, setCallTimer] = useState(0);
+  const [voices, setVoices] = useState([]);
+  const [voicesLoaded, setVoicesLoaded] = useState(false);
+  const [selectedVoice, setSelectedVoice] = useState(null);
+  const [pendingSpeech, setPendingSpeech] = useState(null);
+  const retryCountRef = useRef(0);
+  const MAX_RETRIES = 3;
+
+  // Initialize speech synthesis
+  useEffect(() => {
+    if (!("speechSynthesis" in window)) {
+      setError("Text-to-speech not supported in this browser.");
+      return;
+    }
+    const loadVoices = () => {
+      const allVoices = window.speechSynthesis.getVoices();
+      setVoices(allVoices);
+      setVoicesLoaded(allVoices.length > 0);
+      // Prefer Google/Natural en-US voice
+      const preferred = allVoices.find(
+        (v) => v.lang === "en-US" && /Google|Natural/i.test(v.name)
+      );
+      setSelectedVoice(
+        preferred || allVoices.find((v) => v.lang === "en-US") || allVoices[0]
+      );
+    };
+    loadVoices();
+    window.speechSynthesis.onvoiceschanged = loadVoices;
+    return () => {
+      window.speechSynthesis.onvoiceschanged = null;
+    };
+  }, []);
+
+  // Speak any pending speech when voices are loaded
+  useEffect(() => {
+    if (voicesLoaded && pendingSpeech) {
+      speakText(pendingSpeech);
+      setPendingSpeech(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [voicesLoaded]);
+
+  // Use browser's TTS to speak the agent's response
+  const speakText = (text) => {
+    if (!("speechSynthesis" in window)) {
+      setError("Text-to-speech not supported in this browser.");
+      return;
+    }
+    if (!voicesLoaded) {
+      setTimeout(() => speakText(text), 300); // Wait and retry
+      return;
+    }
+    if (!text || !text.trim()) return;
+    // Stop recognition if running
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch (e) {}
+    }
+    // Only cancel if something is speaking
+    if (window.speechSynthesis.speaking) {
+      window.speechSynthesis.cancel();
+    }
+    const utter = new SpeechSynthesisUtterance(text);
+    if (selectedVoice) utter.voice = selectedVoice;
+    utter.rate = 1.0;
+    utter.pitch = 1.0;
+    utter.volume = 1.0;
+    utter.onstart = () => {
+      setIsAgentSpeaking(true);
+      retryCountRef.current = 0;
+    };
+    utter.onend = () => {
+      setIsAgentSpeaking(false);
+      // Resume recognition if mic is on
+      if (recognitionRef.current && micOn) {
+        try {
+          recognitionRef.current.start();
+        } catch (e) {}
+      }
+    };
+    utter.onerror = (event) => {
+      console.error("Speech synthesis error:", event, event.error);
+      setIsAgentSpeaking(false);
+      if (retryCountRef.current < MAX_RETRIES) {
+        retryCountRef.current++;
+        setTimeout(() => speakText(text), 1000);
+      } else {
+        if (recognitionRef.current && micOn) {
+          try {
+            recognitionRef.current.start();
+          } catch (e) {}
+        }
+      }
+    };
+    try {
+      window.speechSynthesis.speak(utter);
+    } catch (error) {
+      console.error("Error speaking text:", error);
+      if (recognitionRef.current && micOn) {
+        try {
+          recognitionRef.current.start();
+        } catch (e) {}
+      }
+    }
+  };
+
+  // Stop speaking
+  const stopSpeaking = () => {
+    if ("speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
+      setIsAgentSpeaking(false);
+      console.log("Speech stopped");
+      // Resume speech recognition if mic is on
+      if (recognitionRef.current && micOn) {
+        try {
+          recognitionRef.current.start();
+        } catch (e) {
+          console.log("Error restarting recognition:", e);
+        }
+      }
+    }
+  };
+
+  // End button handler: stop agent speaking, stop audio, stop Lottie animation
+  const handleEndCall = () => {
+    stopSpeaking();
+    setAgentResponse("");
+  };
+
+  // Simulate a conversation
+  const simulateConversation = () => {
+    const userQuestions = [
+      "How can I help you today?",
+      "What's on your mind?",
+      "Tell me more about that.",
+      "I'm listening.",
+      "Go ahead.",
+    ];
+    const agentResponses = [
+      "I'm here to assist you with any questions.",
+      "Let me check that for you.",
+      "I'm processing your request.",
+      "Thank you for your patience.",
+      "I understand. How can I help further?",
+    ];
+    const randomQuestion =
+      userQuestions[Math.floor(Math.random() * userQuestions.length)];
+    const randomResponse =
+      agentResponses[Math.floor(Math.random() * agentResponses.length)];
+    setTranscript(randomQuestion);
+    setAgentResponse(randomResponse);
+    speakText(randomResponse);
+  };
 
   // Initialize WebSocket connection
   useEffect(() => {
     const initializeCall = async () => {
       try {
         const response = await fetch(
-          "https://f536-2a09-bac5-58c2-252d-00-3b4-6.ngrok-free.app/call/start",
+          "https://major-narwhal-picked.ngrok-free.app/call/start",
           {
             method: "POST",
           }
@@ -45,24 +198,33 @@ export default function CallAgent() {
         setSessionId(data.session_id);
 
         wsRef.current = new WebSocket(
-          `https://f536-2a09-bac5-58c2-252d-00-3b4-6.ngrok-free.app/call/text/${data.session_id}`
+          `wss://major-narwhal-picked.ngrok-free.app/call/text/${data.session_id}`
         );
 
         wsRef.current.onmessage = async (event) => {
           if (event.data instanceof Blob) {
-            const audioBlob = event.data;
-            const audioUrl = URL.createObjectURL(audioBlob);
-            if (audioRef.current) {
-              audioRef.current.src = audioUrl;
-              audioRef.current.play();
-              setIsAgentSpeaking(true);
-              audioRef.current.onended = () => {
-                setIsAgentSpeaking(false);
-              };
-            }
+            // Ignore audio data from backend
+            console.log("Received audio data, but using browser TTS instead.");
           } else {
-            const response = JSON.parse(event.data);
-            setAgentResponse(response.text);
+            console.log("WebSocket message received:", event.data);
+            let response;
+            try {
+              response = JSON.parse(event.data);
+            } catch (e) {
+              console.error(
+                "Failed to parse WebSocket message as JSON:",
+                event.data
+              );
+              return;
+            }
+            console.log("Parsed response:", response);
+            if (response && response.text) {
+              console.log("Setting agentResponse and speaking:", response.text);
+              setAgentResponse(response.text);
+              speakText(response.text); // Speak the text using browser TTS
+            } else {
+              console.warn("No 'text' field in response:", response);
+            }
           }
         };
 
@@ -242,16 +404,6 @@ export default function CallAgent() {
       audioRef.current.currentTime = 0;
     }
   }, [isAgentSpeaking]);
-
-  // End button handler: stop agent speaking, stop audio, stop Lottie animation
-  const handleEndCall = () => {
-    setIsAgentSpeaking(false);
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current.currentTime = 0;
-    }
-    setAgentResponse("");
-  };
 
   return (
     <div className="min-h-screen flex flex-col items-center justify-center bg-hero-gradient font-sans p-4 relative">
