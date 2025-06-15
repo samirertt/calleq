@@ -26,6 +26,7 @@ export default function CallAgent() {
   const speakingTimeoutRef = useRef();
   const [sessionId, setSessionId] = useState(null);
   const [isAgentSpeaking, setIsAgentSpeaking] = useState(false);
+  const [userListening, setUserListening] = useState(true);
   const [agentResponse, setAgentResponse] = useState("");
   const wsRef = useRef(null);
   const audioRef = useRef(null);
@@ -36,6 +37,8 @@ export default function CallAgent() {
   const [pendingSpeech, setPendingSpeech] = useState(null);
   const retryCountRef = useRef(0);
   const MAX_RETRIES = 3;
+  const sendTranscriptTimeoutRef = useRef();
+  const recognitionBlocked = useRef(false);
 
   // Initialize speech synthesis
   useEffect(() => {
@@ -115,7 +118,7 @@ export default function CallAgent() {
       setIsAgentSpeaking(false);
       if (retryCountRef.current < MAX_RETRIES) {
         retryCountRef.current++;
-        setTimeout(() => speakText(text), 1000);
+        setTimeout(() => speakText(text), 2000);
       } else {
         if (recognitionRef.current && micOn) {
           try {
@@ -184,6 +187,85 @@ export default function CallAgent() {
     speakText(randomResponse);
   };
 
+  // Helper to safely start recognition only if allowed
+  const startRecognitionIfAllowed = () => {
+    if (
+      recognitionRef.current &&
+      !recognitionBlocked.current &&
+      !isAgentSpeaking &&
+      micOn
+    ) {
+      try {
+        recognitionRef.current.start();
+      } catch (e) {
+        console.log("Error starting recognition:", e);
+      }
+    }
+  };
+
+  // Robust helper to play base64 audio from backend
+  const playBase64Audio = (base64Audio, mimeType = "audio/wav") => {
+    if (!base64Audio || !audioRef.current) return;
+    // Convert base64 to binary
+    const binary = atob(base64Audio);
+    const len = binary.length;
+    const buffer = new Uint8Array(len);
+    for (let i = 0; i < len; i++) buffer[i] = binary.charCodeAt(i);
+    // Debug: log first 10 bytes
+    console.log(
+      "Agent audio buffer first 10 bytes:",
+      Array.from(buffer.slice(0, 10))
+    );
+    const blob = new Blob([buffer], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+
+    // Block recognition before stopping and playing audio
+    recognitionBlocked.current = true;
+    setIsAgentSpeaking(true);
+    setUserListening(false);
+    setIsSpeaking(false); // Disable user speaking animation
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch (e) {}
+    }
+
+    audioRef.current.pause();
+    audioRef.current.currentTime = 0;
+    if (audioRef.current.src) URL.revokeObjectURL(audioRef.current.src);
+    audioRef.current.src = url;
+
+    audioRef.current.onended = () => {
+      setIsAgentSpeaking(false);
+      setUserListening(true);
+      recognitionBlocked.current = false;
+      startRecognitionIfAllowed();
+      URL.revokeObjectURL(url);
+    };
+    audioRef.current.onerror = (e) => {
+      setIsAgentSpeaking(false);
+      setUserListening(true);
+      recognitionBlocked.current = false;
+      startRecognitionIfAllowed();
+      URL.revokeObjectURL(url);
+      setError("Failed to play agent audio. Trying MP3 fallback...");
+      if (mimeType === "audio/wav") {
+        setTimeout(() => playBase64Audio(base64Audio, "audio/mp3"), 100);
+      }
+    };
+    audioRef.current.play().catch((e) => {
+      setIsAgentSpeaking(false);
+      setUserListening(true);
+      recognitionBlocked.current = false;
+      startRecognitionIfAllowed();
+      URL.revokeObjectURL(url);
+      setError("Failed to play agent audio. Trying MP3 fallback...");
+      if (mimeType === "audio/wav") {
+        setTimeout(() => playBase64Audio(base64Audio, "audio/mp3"), 100);
+      }
+    });
+  };
+
   // Initialize WebSocket connection
   useEffect(() => {
     const initializeCall = async () => {
@@ -202,29 +284,21 @@ export default function CallAgent() {
         );
 
         wsRef.current.onmessage = async (event) => {
-          if (event.data instanceof Blob) {
-            // Ignore audio data from backend
-            console.log("Received audio data, but using browser TTS instead.");
-          } else {
-            console.log("WebSocket message received:", event.data);
-            let response;
-            try {
-              response = JSON.parse(event.data);
-            } catch (e) {
-              console.error(
-                "Failed to parse WebSocket message as JSON:",
-                event.data
-              );
-              return;
-            }
-            console.log("Parsed response:", response);
-            if (response && response.text) {
-              console.log("Setting agentResponse and speaking:", response.text);
-              setAgentResponse(response.text);
-              speakText(response.text); // Speak the text using browser TTS
-            } else {
-              console.warn("No 'text' field in response:", response);
-            }
+          let response;
+          try {
+            response = JSON.parse(event.data);
+          } catch (e) {
+            console.error(
+              "Failed to parse WebSocket message as JSON:",
+              event.data
+            );
+            return;
+          }
+          if (response && response.text) {
+            setAgentResponse(response.text);
+          }
+          if (response && response.audio) {
+            playBase64Audio(response.audio, "audio/wav");
           }
         };
 
@@ -306,42 +380,49 @@ export default function CallAgent() {
         setRecognizing(false);
         setIsSpeaking(false);
         console.log("Recognition ended");
-        // Restart recognition if mic is still on
-        if (micOn) {
-          try {
-            recognition.start();
-          } catch (e) {
-            console.log("Error restarting recognition:", e);
-          }
-        }
+        // Only restart recognition if not blocked
+        startRecognitionIfAllowed();
       };
       recognition.onresult = (event) => {
         let finalTranscript = "";
+        let interimTranscript = "";
         for (let i = event.resultIndex; i < event.results.length; ++i) {
           if (event.results[i].isFinal) {
             finalTranscript += event.results[i][0].transcript;
+          } else {
+            interimTranscript += event.results[i][0].transcript;
           }
         }
-        if (
-          finalTranscript &&
-          wsRef.current &&
-          wsRef.current.readyState === WebSocket.OPEN
-        ) {
-          wsRef.current.send(
-            JSON.stringify({
-              text: finalTranscript,
-              session_id: sessionId,
-            })
-          );
-        }
-        setTranscript(finalTranscript);
-        if (finalTranscript) {
+        // Animate user speaking as soon as any speech is detected (interim or final)
+        if ((interimTranscript || finalTranscript) && !isAgentSpeaking) {
           setIsSpeaking(true);
           clearTimeout(speakingTimeoutRef.current);
           speakingTimeoutRef.current = setTimeout(
             () => setIsSpeaking(false),
-            3000
+            1200 // shorter timeout for more responsive animation
           );
+        }
+        setTranscript(finalTranscript);
+        if (finalTranscript && !isAgentSpeaking && userListening) {
+          // Debounce sending: only send after user stops speaking for 1s
+          clearTimeout(sendTranscriptTimeoutRef.current);
+          sendTranscriptTimeoutRef.current = setTimeout(() => {
+            if (
+              wsRef.current &&
+              wsRef.current.readyState === WebSocket.OPEN &&
+              finalTranscript &&
+              userListening &&
+              !isAgentSpeaking
+            ) {
+              wsRef.current.send(
+                JSON.stringify({
+                  text: finalTranscript,
+                  session_id: sessionId,
+                })
+              );
+              setTranscript(""); // Clear transcript after sending
+            }
+          }, 1000);
         }
       };
       recognition.onerror = (e) => {
@@ -377,22 +458,24 @@ export default function CallAgent() {
         recognitionRef.current.onerror = null;
       }
       clearTimeout(speakingTimeoutRef.current);
+      clearTimeout(sendTranscriptTimeoutRef.current);
     };
   }, [micOn]);
 
   const toggleMic = () => {
-    if (recognitionRef.current) {
-      if (micOn) {
+    if (micOn) {
+      // Always allow turning mic off
+      if (recognitionRef.current) {
         recognitionRef.current.stop();
-      } else {
-        try {
-          recognitionRef.current.start();
-        } catch (e) {
-          console.log("Error starting recognition:", e);
-        }
+      }
+      setMicOn(false);
+    } else {
+      // Only allow turning mic on if agent is not speaking
+      if (userListening && !isAgentSpeaking && !recognitionBlocked.current) {
+        startRecognitionIfAllowed();
+        setMicOn(true);
       }
     }
-    setMicOn(!micOn);
   };
 
   // Play agent audio and animate Lottie when agent is speaking
@@ -415,8 +498,16 @@ export default function CallAgent() {
         href="/"
         className="fixed top-4 sm:top-6 left-4 sm:left-12 z-20 flex items-center gap-2 cursor-pointer"
       >
-        <Image src="/images/logo.png" alt="Logo" width={40} height={40} className="w-10 h-10 sm:w-[60px] sm:h-[60px]" />
-        <span className="text-xl sm:text-2xl font-bold text-blackText">CallEQ</span>
+        <Image
+          src="/images/logo.png"
+          alt="Logo"
+          width={40}
+          height={40}
+          className="w-10 h-10 sm:w-[60px] sm:h-[60px]"
+        />
+        <span className="text-xl sm:text-2xl font-bold text-blackText">
+          CallEQ
+        </span>
       </Link>
       <div className="w-full max-w-5xl flex flex-col md:flex-row items-center justify-center gap-6 sm:gap-12 px-4 sm:px-0">
         {/* User Speaking Animation */}
@@ -444,7 +535,13 @@ export default function CallAgent() {
                 ease: "easeInOut",
               }}
             >
-              <svg width="28" height="28" fill="none" viewBox="0 0 24 24" className="sm:w-9 sm:h-9">
+              <svg
+                width="28"
+                height="28"
+                fill="none"
+                viewBox="0 0 24 24"
+                className="sm:w-9 sm:h-9"
+              >
                 <path
                   fill="#fff"
                   d="M12 16a4 4 0 0 0 4-4V8a4 4 0 1 0-8 0v4a4 4 0 0 0 4 4Zm6-4a6 6 0 1 1-12 0V8a6 6 0 1 1 12 0v4Zm-6 7a7.978 7.978 0 0 1-6.32-3.16A1 1 0 0 1 6.1 14.1a1 1 0 0 1 1.4.2A5.978 5.978 0 0 0 12 19a5.978 5.978 0 0 0 4.5-2.7a1 1 0 0 1 1.6 1.2A7.978 7.978 0 0 1 12 19Z"
@@ -467,7 +564,13 @@ export default function CallAgent() {
               }}
               className="inline-flex"
             >
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" className="sm:w-6 sm:h-6">
+              <svg
+                width="20"
+                height="20"
+                viewBox="0 0 24 24"
+                fill="none"
+                className="sm:w-6 sm:h-6"
+              >
                 <rect
                   x="3"
                   y="10"
@@ -515,6 +618,7 @@ export default function CallAgent() {
               onClick={toggleMic}
               aria-label={micOn ? "Turn microphone off" : "Turn microphone on"}
               title={micOn ? "Turn microphone off" : "Turn microphone on"}
+              disabled={!userListening || isAgentSpeaking}
             >
               {micOn ? <FaMicrophone /> : <FaMicrophoneSlash />}
             </button>
@@ -543,7 +647,9 @@ export default function CallAgent() {
             <div className="absolute top-4 sm:top-5 right-4 sm:right-6 text-[10px] sm:text-xs text-gray-400 z-10 flex items-center gap-1">
               {/* Signal Bars */}
               <svg
-                width="14" height="10" viewBox="0 0 18 12"
+                width="14"
+                height="10"
+                viewBox="0 0 18 12"
                 fill="none"
                 xmlns="http://www.w3.org/2000/svg"
                 className="sm:w-[18px] sm:h-[12px]"
@@ -587,7 +693,9 @@ export default function CallAgent() {
               </svg>
               {/* WiFi Icon */}
               <svg
-                width="12" height="10" viewBox="0 0 16 12"
+                width="12"
+                height="10"
+                viewBox="0 0 16 12"
                 fill="none"
                 xmlns="http://www.w3.org/2000/svg"
                 className="sm:w-[16px] sm:h-[12px]"
@@ -614,7 +722,9 @@ export default function CallAgent() {
               </svg>
               {/* Battery Toggle */}
               <svg
-                width="18" height="10" viewBox="0 0 22 12"
+                width="18"
+                height="10"
+                viewBox="0 0 22 12"
                 fill="none"
                 xmlns="http://www.w3.org/2000/svg"
                 className="sm:w-[22px] sm:h-[12px]"
@@ -682,7 +792,9 @@ export default function CallAgent() {
             </div>
             {/* Agent Response Text */}
             <div className="absolute bottom-24 sm:bottom-32 left-0 w-full px-4 sm:px-6 text-center">
-              <p className="text-gray-700 text-xs sm:text-sm">{agentResponse}</p>
+              <p className="text-gray-700 text-xs sm:text-sm">
+                {agentResponse}
+              </p>
             </div>
             {/* Call Controls (bottom) */}
             <div className="w-full absolute bottom-6 sm:bottom-10 left-0 flex items-center justify-center gap-8 sm:gap-12 z-10">
@@ -690,7 +802,9 @@ export default function CallAgent() {
                 <button className="w-12 h-12 sm:w-16 sm:h-16 rounded-full bg-gray-400/30 flex items-center justify-center text-white text-xl sm:text-2xl shadow">
                   <FaUserPlus />
                 </button>
-                <span className="text-[10px] sm:text-xs text-gray-700 mt-1 sm:mt-2">Add</span>
+                <span className="text-[10px] sm:text-xs text-gray-700 mt-1 sm:mt-2">
+                  Add
+                </span>
               </div>
               <div className="flex flex-col items-center">
                 <button
@@ -699,13 +813,17 @@ export default function CallAgent() {
                 >
                   <FaPhoneSlash />
                 </button>
-                <span className="text-[10px] sm:text-xs text-gray-700 mt-1 sm:mt-2">End</span>
+                <span className="text-[10px] sm:text-xs text-gray-700 mt-1 sm:mt-2">
+                  End
+                </span>
               </div>
               <div className="flex flex-col items-center">
                 <button className="w-12 h-12 sm:w-16 sm:h-16 rounded-full bg-gray-400/30 flex items-center justify-center text-white text-xl sm:text-2xl shadow">
                   <FaTh />
                 </button>
-                <span className="text-[10px] sm:text-xs text-gray-700 mt-1 sm:mt-2">Keypad</span>
+                <span className="text-[10px] sm:text-xs text-gray-700 mt-1 sm:mt-2">
+                  Keypad
+                </span>
               </div>
             </div>
           </div>
@@ -721,7 +839,13 @@ export default function CallAgent() {
               className="inline-flex"
             >
               {/* Speaking wave icon */}
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" className="sm:w-6 sm:h-6">
+              <svg
+                width="20"
+                height="20"
+                viewBox="0 0 24 24"
+                fill="none"
+                className="sm:w-6 sm:h-6"
+              >
                 <rect
                   x="3"
                   y="10"
