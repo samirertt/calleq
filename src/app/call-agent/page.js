@@ -248,10 +248,9 @@ export default function CallAgent() {
       recognitionBlocked.current = false;
       startRecognitionIfAllowed();
       URL.revokeObjectURL(url);
-      setError("Failed to play agent audio. Trying MP3 fallback...");
-      if (mimeType === "audio/wav") {
-        setTimeout(() => playBase64Audio(base64Audio, "audio/mp3"), 100);
-      }
+      setError("Failed to play agent audio. Using TTS fallback...");
+      // Fallback to TTS if audio fails
+      if (agentResponse) speakText(agentResponse);
     };
     audioRef.current.play().catch((e) => {
       setIsAgentSpeaking(false);
@@ -259,10 +258,9 @@ export default function CallAgent() {
       recognitionBlocked.current = false;
       startRecognitionIfAllowed();
       URL.revokeObjectURL(url);
-      setError("Failed to play agent audio. Trying MP3 fallback...");
-      if (mimeType === "audio/wav") {
-        setTimeout(() => playBase64Audio(base64Audio, "audio/mp3"), 100);
-      }
+      setError("Failed to play agent audio. Using TTS fallback...");
+      // Fallback to TTS if audio fails
+      if (agentResponse) speakText(agentResponse);
     });
   };
 
@@ -279,6 +277,16 @@ export default function CallAgent() {
         const data = await response.json();
         setSessionId(data.session_id);
 
+        // Handle greeting from backend
+        if (data.greeting_text) {
+          setAgentResponse(data.greeting_text);
+          if (data.greeting_audio) {
+            playBase64Audio(data.greeting_audio, "audio/wav");
+          } else {
+            speakText(data.greeting_text);
+          }
+        }
+
         wsRef.current = new WebSocket(
           `wss://major-narwhal-picked.ngrok-free.app/call/text/${data.session_id}`
         );
@@ -294,11 +302,15 @@ export default function CallAgent() {
             );
             return;
           }
-          if (response && response.text) {
-            setAgentResponse(response.text);
-          }
-          if (response && response.audio) {
+          // Only process response if it's not the initial greeting
+          if (response && response.audio && !response.is_greeting) {
             playBase64Audio(response.audio, "audio/wav");
+            // Only set agentResponse text for display, do not TTS
+            if (response.text) setAgentResponse(response.text);
+          } else if (response && response.text && !response.is_greeting) {
+            setAgentResponse(response.text);
+            // Only use TTS if no audio is present
+            speakText(response.text);
           }
         };
 
@@ -333,22 +345,6 @@ export default function CallAgent() {
 
     return () => clearInterval(timerInterval);
   }, []);
-
-  // Send transcript to backend when it changes
-  useEffect(() => {
-    if (
-      transcript &&
-      wsRef.current &&
-      wsRef.current.readyState === WebSocket.OPEN
-    ) {
-      wsRef.current.send(
-        JSON.stringify({
-          text: transcript,
-          session_id: sessionId,
-        })
-      );
-    }
-  }, [transcript, sessionId]);
 
   useEffect(() => {
     const SpeechRecognition =
@@ -492,6 +488,11 @@ export default function CallAgent() {
     <div className="min-h-screen flex flex-col items-center justify-center bg-hero-gradient font-sans p-4 relative">
       {/* Audio element for playing responses */}
       <audio ref={audioRef} className="hidden" />
+      {error && (
+        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 bg-red-100 text-red-700 px-4 py-2 rounded shadow z-50 text-sm font-semibold">
+          {error}
+        </div>
+      )}
 
       {/* Logo in top left */}
       <Link
@@ -792,7 +793,7 @@ export default function CallAgent() {
             </div>
             {/* Agent Response Text */}
             <div className="absolute bottom-24 sm:bottom-32 left-0 w-full px-4 sm:px-6 text-center">
-              <p className="text-gray-700 text-xs sm:text-sm">
+              <p className="text-gray-700 text-sm sm:text-base font-medium bg-white/30 backdrop-blur-sm rounded-lg p-3 sm:p-4 shadow-sm max-w-[90%] mx-auto mb-2 sm:mb-4">
                 {agentResponse}
               </p>
             </div>
@@ -880,7 +881,7 @@ export default function CallAgent() {
                 />
               </svg>
             </motion.span>
-            {isAgentSpeaking ? "Agent Speaking..." : "Agent Ready"}
+            {isAgentSpeaking ? "Agent Speaking..." : "Agent Listening..."}
           </div>
         </div>
       </div>
