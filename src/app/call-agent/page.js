@@ -39,6 +39,14 @@ export default function CallAgent() {
   const MAX_RETRIES = 3;
   const sendTranscriptTimeoutRef = useRef();
   const recognitionBlocked = useRef(false);
+  const hasGreetedRef = useRef(false);
+  const voicesRef = useRef([
+    '/voices/test-2.wav',
+    '/voices/test-2 (1).wav',
+    '/voices/test-2 (2).wav',
+    '/voices/test-2 (3).wav',
+    '/voices/test-2 (4).wav'
+  ]);
 
   // Initialize speech synthesis
   useEffect(() => {
@@ -206,29 +214,28 @@ export default function CallAgent() {
   // Robust helper to play base64 audio from backend
   const playBase64Audio = (base64Audio, mimeType = "audio/wav") => {
     if (!base64Audio || !audioRef.current) return;
+    
     // Convert base64 to binary
     const binary = atob(base64Audio);
     const len = binary.length;
     const buffer = new Uint8Array(len);
     for (let i = 0; i < len; i++) buffer[i] = binary.charCodeAt(i);
-    // Debug: log first 10 bytes
-    console.log(
-      "Agent audio buffer first 10 bytes:",
-      Array.from(buffer.slice(0, 10))
-    );
+    
     const blob = new Blob([buffer], { type: mimeType });
     const url = URL.createObjectURL(blob);
 
-    // Block recognition before stopping and playing audio
-    recognitionBlocked.current = true;
-    setIsAgentSpeaking(true);
-    setUserListening(false);
-    setIsSpeaking(false); // Disable user speaking animation
+    // Stop recognition before playing audio
     if (recognitionRef.current) {
       try {
         recognitionRef.current.stop();
       } catch (e) {}
     }
+
+    // Set states for audio playback
+    recognitionBlocked.current = true;
+    setIsAgentSpeaking(true);
+    setUserListening(false);
+    setIsSpeaking(false);
 
     audioRef.current.pause();
     audioRef.current.currentTime = 0;
@@ -239,29 +246,104 @@ export default function CallAgent() {
       setIsAgentSpeaking(false);
       setUserListening(true);
       recognitionBlocked.current = false;
-      startRecognitionIfAllowed();
+      // Resume recognition after audio ends
+      if (micOn && recognitionRef.current) {
+        try {
+          recognitionRef.current.start();
+        } catch (e) {}
+      }
       URL.revokeObjectURL(url);
     };
+
     audioRef.current.onerror = (e) => {
+      console.error("Audio playback error:", e);
       setIsAgentSpeaking(false);
       setUserListening(true);
       recognitionBlocked.current = false;
-      startRecognitionIfAllowed();
+      // Resume recognition after error
+      if (micOn && recognitionRef.current) {
+        try {
+          recognitionRef.current.start();
+        } catch (e) {}
+      }
       URL.revokeObjectURL(url);
-      setError("Failed to play agent audio. Using TTS fallback...");
-      // Fallback to TTS if audio fails
-      if (agentResponse) speakText(agentResponse);
+      setError("Failed to play agent audio. Please try again.");
     };
+
     audioRef.current.play().catch((e) => {
+      console.error("Audio play error:", e);
       setIsAgentSpeaking(false);
       setUserListening(true);
       recognitionBlocked.current = false;
-      startRecognitionIfAllowed();
+      // Resume recognition after error
+      if (micOn && recognitionRef.current) {
+        try {
+          recognitionRef.current.start();
+        } catch (e) {}
+      }
       URL.revokeObjectURL(url);
-      setError("Failed to play agent audio. Using TTS fallback...");
-      // Fallback to TTS if audio fails
-      if (agentResponse) speakText(agentResponse);
+      setError("Failed to play agent audio. Please try again.");
     });
+  };
+
+  // Function to play random intermediate voice
+  const playRandomVoice = () => {
+    const voices = voicesRef.current;
+    const randomVoice = voices[Math.floor(Math.random() * voices.length)];
+    
+    if (audioRef.current) {
+      // Stop recognition before playing intermediate voice
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.stop();
+        } catch (e) {}
+      }
+
+      audioRef.current.pause();
+      audioRef.current.currentTime = 0;
+      if (audioRef.current.src) URL.revokeObjectURL(audioRef.current.src);
+      
+      // Use the correct path from public directory
+      const fullPath = `${window.location.origin}${randomVoice}`;
+      console.log("Playing intermediate voice from:", fullPath);
+      
+      audioRef.current.src = fullPath;
+      
+      // Set states for intermediate voice
+      recognitionBlocked.current = true;
+      setIsAgentSpeaking(true);
+      setUserListening(false);
+      setIsSpeaking(false);
+
+      const playPromise = audioRef.current.play();
+      if (playPromise !== undefined) {
+        playPromise
+          .then(() => {
+            console.log("Intermediate voice started playing");
+          })
+          .catch(error => {
+            console.error("Intermediate voice play error:", error);
+            // Resume recognition if playback fails
+            recognitionBlocked.current = false;
+            if (micOn && recognitionRef.current) {
+              try {
+                recognitionRef.current.start();
+              } catch (e) {}
+            }
+          });
+      }
+
+      // Add error handler for intermediate voice
+      audioRef.current.onerror = (e) => {
+        console.error("Intermediate voice error:", e);
+        recognitionBlocked.current = false;
+        if (micOn && recognitionRef.current) {
+          try {
+            recognitionRef.current.start();
+          } catch (e) {}
+        }
+      };
+    }
   };
 
   // Initialize WebSocket connection
@@ -296,21 +378,45 @@ export default function CallAgent() {
           try {
             response = JSON.parse(event.data);
           } catch (e) {
-            console.error(
-              "Failed to parse WebSocket message as JSON:",
-              event.data
-            );
+            console.error("Failed to parse WebSocket message as JSON:", event.data);
             return;
           }
-          // Only process response if it's not the initial greeting
-          if (response && response.audio && !response.is_greeting) {
-            playBase64Audio(response.audio, "audio/wav");
-            // Only set agentResponse text for display, do not TTS
-            if (response.text) setAgentResponse(response.text);
-          } else if (response && response.text && !response.is_greeting) {
-            setAgentResponse(response.text);
-            // Only use TTS if no audio is present
-            speakText(response.text);
+
+          if (response && response.text) {
+            // Handle greeting only once
+            if (response.is_greeting && !hasGreetedRef.current) {
+              setAgentResponse(response.text);
+              if (response.audio) {
+                playBase64Audio(response.audio, "audio/wav");
+              }
+              hasGreetedRef.current = true;
+              return;
+            }
+
+            // Handle regular responses
+            if (!response.is_greeting) {
+              // Wait for any intermediate voice to finish before playing response
+              const waitForIntermediateVoice = () => {
+                return new Promise((resolve) => {
+                  if (audioRef.current && audioRef.current.currentTime > 0) {
+                    audioRef.current.onended = () => {
+                      console.log("Intermediate voice finished, playing response");
+                      resolve();
+                    };
+                  } else {
+                    resolve();
+                  }
+                });
+              };
+
+              // Play response after intermediate voice finishes
+              waitForIntermediateVoice().then(() => {
+                setAgentResponse(response.text);
+                if (response.audio) {
+                  playBase64Audio(response.audio, "audio/wav");
+                }
+              });
+            }
           }
         };
 
@@ -410,6 +516,9 @@ export default function CallAgent() {
               userListening &&
               !isAgentSpeaking
             ) {
+              // Play intermediate voice immediately after sending the question
+              playRandomVoice();
+              
               wsRef.current.send(
                 JSON.stringify({
                   text: finalTranscript,
