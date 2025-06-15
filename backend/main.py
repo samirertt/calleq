@@ -8,14 +8,8 @@ from typing import Dict, List
 import asyncio
 from datetime import datetime
 from utils import process_text_input
-from google import genai
-from google.genai import types
-import wave
-import os
-from dotenv import load_dotenv
-
-# Load environment variables
-load_dotenv()
+from mytts import text_to_speech
+import base64
 
 # Configure logging
 logging.basicConfig(
@@ -39,48 +33,10 @@ app.add_middleware(
 active_sessions: Dict[str, WebSocket] = {}
 conversations: Dict[str, List[dict]] = {}
 
-# Initialize Gemini client
-client = genai.Client(api_key=os.getenv("GENAI_API_KEY"))
-
-def wave_file(filename, pcm, channels=1, rate=24000, sample_width=2):
-    """Save PCM data to a WAV file"""
-    with wave.open(filename, "wb") as wf:
-        wf.setnchannels(channels)
-        wf.setsampwidth(sample_width)
-        wf.setframerate(rate)
-        wf.writeframes(pcm)
-
-def text_to_speech(text: str) -> bytes:
-    """Convert text to speech using Gemini TTS and return audio data as bytes"""
-    try:
-        prompt = f"""TTS the following response from the AI assistant:
-        Assistant: {text}"""
-
-        response = client.models.generate_content(
-            model="gemini-2.5-flash-preview-tts",
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_modalities=["AUDIO"],
-                speech_config=types.SpeechConfig(
-                    voice_config=types.VoiceConfig(
-                        prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                            voice_name='Kore',
-                        )
-                    )
-                )
-            )
-        )
-
-
-        # Return the audio data as bytes
-        return response.candidates[0].content.parts[0].inline_data.data
-    except Exception as e:
-        logger.error(f"Error in text-to-speech conversion: {str(e)}")
-        return None
-
 class CallStartResponse(BaseModel):
     session_id: str
     greeting_text: str
+    greeting_audio: str  # Base64 encoded audio data
 
 class TextInput(BaseModel):
     text: str
@@ -92,11 +48,16 @@ async def start_call() -> CallStartResponse:
     session_id = str(uuid.uuid4())
     greeting_text = "Hello, my name is AI Assistant from Company X. How can I help you?"
     
+    # Generate audio for greeting
+    audio_data = text_to_speech(greeting_text)
+    audio_base64 = base64.b64encode(audio_data).decode('utf-8')
+    
     conversations[session_id] = []
     
     return CallStartResponse(
         session_id=session_id,
-        greeting_text=greeting_text
+        greeting_text=greeting_text,
+        greeting_audio=audio_base64
     )
 
 @app.websocket("/call/text/{session_id}")
@@ -121,6 +82,10 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 conversation_history=conversations[session_id]
             )
             
+            # Generate audio for response
+            audio_data = text_to_speech(response)
+            audio_base64 = base64.b64encode(audio_data).decode('utf-8')
+            
             # Add to conversation history
             conversations[session_id].append({
                 "role": "user",
@@ -131,24 +96,12 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 "text": response
             })
             
-            # Convert response to speech
-            audio_data = text_to_speech(response)
-            if audio_data:
-                # Send both text and audio response
-                await websocket.send_text(json.dumps({
-                    "type": "response",
-                    "text": response,
-                    "has_audio": True
-                }))
-                # Send audio data as binary
-                await websocket.send_bytes(audio_data)
-            else:
-                # Send only text response if audio conversion fails
-                await websocket.send_text(json.dumps({
-                    "type": "response",
-                    "text": response,
-                    "has_audio": False
-                }))
+            # Send response back with audio
+            await websocket.send_text(json.dumps({
+                "type": "response",
+                "text": response,
+                "audio": audio_base64
+            }))
             
     except WebSocketDisconnect:
         logger.info(f"Client disconnected: {session_id}")
