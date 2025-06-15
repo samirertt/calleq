@@ -75,9 +75,10 @@ export default function Home() {
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.4, duration: 0.8, ease: "easeOut" }}
         >
-          CallEQ lets customers talk to an AI assistant directly in their
-          browser. It listens, understands, detects emotion, and responds with a
-          realistic AI voice—no phone line required.
+          <b>CallEQ</b> is an AI-powered call agent platform designed for
+          seamless integration with call service companies. This web app is a
+          simulation demo, a realistic AI voice—just like it would in a real
+          customer call.
         </motion.p>
         <motion.div
           className="mb-10"
