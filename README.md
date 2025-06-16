@@ -23,7 +23,7 @@ This project uses [`next/font`](https://nextjs.org/docs/app/building-your-applic
 Demo of our project
 ![image](https://github.com/user-attachments/assets/0420e0f9-954d-40ca-b293-0480c821b1dc)
 
-
+🎥 [Watch the demo video](https://drive.google.com/file/d/1Ir2yts-LZyycWdj4uKvOZevYFHzYQQ5r/view?usp=share_link)
 
 
 ## Learn More
